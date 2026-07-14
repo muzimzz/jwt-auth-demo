@@ -43,7 +43,7 @@ public class CustomOAuth2UserService extends DefaultOAuth2UserService {
 
         User user = userRepository.findBySocialTypeAndSocialTypeId(attrs.socialType(), attrs.socialTypeId())
                 .map(existingUser -> existingUser.update(attrs.name(), attrs.email()))
-                // 정보가 바뀐채로 로그인될경우 update, 컬럼이 많아지면 dto 고려
+                // 정보가 바뀐채로 로그인될경우 update, 컬럼이 많아지면 dto 고려. 실제로 값이 바뀌지 않았을 경우에는 update쿼리 x (dirty check)
                 .orElseGet(() -> userRepository.save(attrs.toEntity()));
 
         return new CustomOAuth2User(user, List.of(new SimpleGrantedAuthority(user.getRole().name())), attrs.attributes(), attrs.nameAttributeKey());
