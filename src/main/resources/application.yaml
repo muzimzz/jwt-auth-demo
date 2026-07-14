@@ -4,6 +4,7 @@ spring:
   security:
     oauth2:
       client:
+        # client-secret이 그대로 들어가면 git push reject됨: 원래는 환경변수로 치환 필요
         registration:
           kakao:
             client-id: 1cfea2e7d45ecaf9be374cb0b78a40b1 # REST API key
