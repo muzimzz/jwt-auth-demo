@@ -34,6 +34,12 @@ public class CustomOidcUserService extends OidcUserService {
     public OidcUser loadUser(OidcUserRequest userRequest) throws OAuth2AuthenticationException {
         OidcUser oidcUser = super.loadUser(userRequest); // id_token 검증 + (설정된 경우) userinfo 병합까지 끝난 상태
 
+        /**
+         * application.yaml에 있는 security:oauth2:client:registration 안의
+         * kakao/naver가 key, 나머지 내용이 value인 map으로 바인딩됨
+         * 이 map을 순회하면서 각 쌍마다 ClientRegistration객체를 생성
+         */
+
         String registrationId = userRequest.getClientRegistration().getRegistrationId();
         SocialType socialType = SocialType.valueOf(registrationId.toUpperCase());
         String userNameAttributeName = userRequest.getClientRegistration()

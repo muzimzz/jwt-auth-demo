@@ -12,7 +12,7 @@ spring:
             redirect-uri: http://localhost:8080/login/oauth2/code/kakao
             client-authentication-method: client_secret_post
             authorization-grant-type: authorization_code
-            scope: openid, profile_nickname, profile_image, friends
+            scope: openid, profile_nickname, profile_image
 
           naver:
             client-name: muzi-jwt-demo              # [선택] 서비스 이름 (로그인 창 띄울 때 식별용)
