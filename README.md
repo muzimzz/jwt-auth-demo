@@ -19,6 +19,178 @@
 
 ---
 
+
+---
+
+# 전체흐름 시퀀스 다이어그램
+
+## 1. 로그인 & 토큰 발급
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant R as Redis
+
+    C->>S: POST /login (credentials)
+    S->>S: 인증 성공
+    S->>S: AT 생성 (jti=uuidA, iat=T0, exp=T0+15m)
+    S->>S: RT 생성 (jti/랜덤값, exp=T0+2주)
+    S->>R: SET refreshToken:{memberId} = RT (해시 저장)
+    S-->>C: Set-Cookie AT, RT (httpOnly, Secure, SameSite)
+```
+
+---
+
+## 2. 일반 API 요청 & AT 검증 (블랙리스트 + tokenValidAfter)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant R as Redis
+
+    C->>S: GET /api/orders (Cookie: AT)
+    S->>S: AT 서명/만료(exp) 검증
+    alt 서명 무효 or 만료
+        S-->>C: 401 Unauthorized
+    else 서명 유효
+        S->>R: GET blacklist:{AT.jti}
+        alt 블랙리스트 존재
+            R-->>S: revoked
+            S-->>C: 401 Unauthorized
+        else 블랙리스트 없음
+            R-->>S: (없음)
+            S->>R: GET tokenValidAfter:{memberId}
+            R-->>S: T_valid (또는 없음)
+            alt AT.iat < T_valid
+                S-->>C: 401 Unauthorized (구버전 토큰)
+            else AT.iat >= T_valid
+                S-->>C: 200 OK (정상 처리)
+            end
+        end
+    end
+```
+
+---
+
+## 3. AT 만료 → 재발급 (RTR 정상 흐름)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant R as Redis
+
+    C->>S: POST /reissue (Cookie: RT1)
+    S->>R: GET refreshToken:{memberId}
+    R-->>S: 저장된 RT 해시
+    S->>S: 클라이언트 RT1 해시 == 저장된 해시?
+    alt 일치 (정상 RT)
+        S->>S: AT2 생성 (jti=uuidB, iat=T1)
+        S->>S: RT2 생성 (새 토큰)
+        S->>R: DEL refreshToken:{memberId} (RT1 폐기)
+        S->>R: SET refreshToken:{memberId} = RT2 (해시 저장)
+        S-->>C: Set-Cookie AT2, RT2
+    else 불일치 (이미 폐기된 RT1 재사용)
+        Note over S,R: 탈취 의심 → 4번 시나리오로 이어짐
+        S-->>C: 401 + 전체 세션 무효화 안내
+    end
+```
+
+---
+
+## 4. RT 탈취 탐지 (재사용 시도 감지)
+
+```mermaid
+sequenceDiagram
+    participant Attacker as 공격자
+    participant Victim as 정상 유저
+    participant S as Server
+    participant R as Redis
+
+    Note over Attacker,Victim: 공격자가 RT1을 미리 탈취한 상태
+
+    Attacker->>S: POST /reissue (RT1)
+    S->>R: GET refreshToken:{memberId}
+    R-->>S: RT1 해시 (아직 유효)
+    S->>S: 일치 → 정상 처리
+    S->>R: DEL refreshToken:{memberId} (RT1 폐기)
+    S->>R: SET refreshToken:{memberId} = RT2
+    S-->>Attacker: AT2, RT2 (공격자가 새 토큰 획득)
+
+    Victim->>S: POST /reissue (여전히 RT1 사용)
+    S->>R: GET refreshToken:{memberId}
+    R-->>S: RT2 해시 (RT1과 불일치)
+    S->>S: 폐기된 토큰 재사용 감지!
+    S->>R: DEL refreshToken:{memberId} (RT2까지 전체 폐기)
+    S->>R: SET tokenValidAfter:{memberId} = now
+    S-->>Victim: 401 + 재로그인 요구
+    Note over Attacker: 이후 AT2도 tokenValidAfter에 걸려 무효화됨
+```
+
+---
+
+## 5. 로그아웃 (현재 기기만)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant R as Redis
+
+    C->>S: POST /logout (Cookie: AT, RT)
+    S->>S: AT 파싱 → jti 추출
+    S->>R: SET blacklist:{AT.jti} = revoked (TTL = AT 남은 만료시간)
+    S->>R: DEL refreshToken:{memberId}
+    S-->>C: Set-Cookie AT/RT 만료 (Max-Age=0)
+```
+
+---
+
+## 6. 비밀번호 변경 / 관리자 차단 / 탈취 의심 신고 (전체 기기 차단)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant R as Redis
+
+    C->>S: POST /change-password (또는 관리자 차단 트리거)
+    S->>S: 처리 완료
+    S->>R: SET tokenValidAfter:{memberId} = now (TTL = AT 최대 수명)
+    S->>R: DEL refreshToken:{memberId}
+    Note over R: 모든 기기의 기존 AT는 iat < tokenValidAfter 로 걸림
+    Note over R: RT 삭제로 재발급 경로도 차단됨
+    S-->>C: 200 OK (모든 기기 강제 로그아웃 처리됨)
+```
+
+---
+
+## 전체 흐름 요약 (텍스트)
+
+```
+로그인
+ → AT(jti=uuidA, iat=T0) + RT1 발급, RT1은 Redis에 저장
+
+매 API 요청
+ → AT 서명/만료 검증
+ → blacklist:{jti} 확인 (개별 토큰 무효화 여부)
+ → tokenValidAfter:{memberId} 와 iat 비교 (전체 무효화 여부)
+
+AT 만료 시
+ → RT로 재발급 요청
+ → RTR: 기존 RT 폐기 + 새 AT/RT 쌍 발급
+ → 폐기된 RT 재사용 감지 시: 전체 RT 폐기 + tokenValidAfter 갱신 + 재로그인 요구
+
+로그아웃 (현재 기기)
+ → blacklist:{AT.jti} 등록 + RT 삭제
+
+비밀번호 변경 / 강제 차단 / 탈취 신고 (전체 기기)
+ → tokenValidAfter:{memberId} 갱신 + RT 삭제
+```
+
+
 ## 1. JWT란
 
 `Header.Payload.Signature` 세 부분을 base64url로 인코딩해서 이어붙인 토큰.
